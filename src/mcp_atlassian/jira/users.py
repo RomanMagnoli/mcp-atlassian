@@ -88,7 +88,7 @@ class UsersMixin(JiraClient):
             error_msg = f"Unable to get current user account ID: {e}"
             raise Exception(error_msg) from e
 
-    def _get_account_id(self, assignee: str) -> str:
+    def _get_account_id(self, assignee) -> str:
         """
         Get the account ID for a username or account ID.
 
@@ -101,6 +101,29 @@ class UsersMixin(JiraClient):
         Raises:
             ValueError: If the account ID could not be found.
         """
+        # Defensive handling: callers may pass a dict-like user object
+        # (e.g. {'accountId': '...', 'displayName': '...'}). Normalize to a
+        # string identifier when possible, or use the contained accountId/name/key.
+        if isinstance(assignee, dict):
+            # Prefer explicit accountId when present (Cloud)
+            if "accountId" in assignee and isinstance(assignee["accountId"], str):
+                return assignee["accountId"]
+            # For Server/DC, use 'name' or 'key' when available
+            if "name" in assignee and isinstance(assignee["name"], str):
+                return assignee["name"]
+            if "key" in assignee and isinstance(assignee["key"], str):
+                return assignee["key"]
+            # Fall back to displayName (will require lookup)
+            if "displayName" in assignee and isinstance(assignee["displayName"], str):
+                assignee = assignee["displayName"]
+            else:
+                # As a last resort, stringify the dict to continue lookup flow
+                assignee = str(assignee)
+
+        # Ensure we have a string before calling string methods
+        if not isinstance(assignee, str):
+            assignee = str(assignee)
+
         # If it looks like an account ID already, return it
         if assignee.startswith("5") and len(assignee) >= 10:
             return assignee
