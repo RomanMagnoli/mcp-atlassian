@@ -30,11 +30,12 @@ class ProjectsMixin(JiraClient, SearchOperationsProto):
             List of project data dictionaries
         """
         try:
+            # Use direct API v3 call instead of library method
             params = {}
             if include_archived:
                 params["includeArchived"] = "true"
 
-            projects = self.jira.projects(included_archived=include_archived)
+            projects = self.jira.get("/rest/api/3/project", params=params)
             return projects if isinstance(projects, list) else []
 
         except Exception as e:
@@ -52,9 +53,10 @@ class ProjectsMixin(JiraClient, SearchOperationsProto):
             Project data or None if not found
         """
         try:
-            project_data = self.jira.project(project_key)
+            # Use direct API v3 call instead of library method
+            project_data = self.jira.get(f"/rest/api/3/project/{project_key}")
             if not isinstance(project_data, dict):
-                msg = f"Unexpected return value type from `jira.project`: {type(project_data)}"
+                msg = f"Unexpected return value type from project API: {type(project_data)}"
                 logger.error(msg)
                 raise TypeError(msg)
             return project_data
@@ -106,7 +108,8 @@ class ProjectsMixin(JiraClient, SearchOperationsProto):
             List of component data dictionaries
         """
         try:
-            components = self.jira.get_project_components(key=project_key)
+            # Use direct API v3 call instead of library method
+            components = self.jira.get(f"/rest/api/3/project/{project_key}/component")
             return components if isinstance(components, list) else []
 
         except Exception as e:
@@ -126,7 +129,8 @@ class ProjectsMixin(JiraClient, SearchOperationsProto):
             List of version data dictionaries
         """
         try:
-            raw_versions = self.jira.get_project_versions(key=project_key)
+            # Use direct API v3 call instead of library method
+            raw_versions = self.jira.get(f"/rest/api/3/project/{project_key}/version")
             if not isinstance(raw_versions, list):
                 return []
             versions: list[dict[str, Any]] = []
@@ -149,7 +153,8 @@ class ProjectsMixin(JiraClient, SearchOperationsProto):
             Dictionary of role names mapped to role details
         """
         try:
-            roles = self.jira.get_project_roles(project_key=project_key)
+            # Use direct API v3 call instead of library method
+            roles = self.jira.get(f"/rest/api/3/project/{project_key}/role")
             return roles if isinstance(roles, dict) else {}
 
         except Exception as e:
@@ -250,9 +255,11 @@ class ProjectsMixin(JiraClient, SearchOperationsProto):
             List of issue type data dictionaries
         """
         try:
-            meta = self.jira.issue_createmeta(project=project_key)
+            # Use direct API v3 call instead of library method
+            params = {"projectKeys": project_key, "expand": "projects.issuetypes.fields"}
+            meta = self.jira.get("/rest/api/3/issue/createmeta", params=params)
             if not isinstance(meta, dict):
-                msg = f"Unexpected return value type from `jira.issue_createmeta`: {type(meta)}"
+                msg = f"Unexpected return value type from createmeta API: {type(meta)}"
                 logger.error(msg)
                 raise TypeError(msg)
 
@@ -282,9 +289,14 @@ class ProjectsMixin(JiraClient, SearchOperationsProto):
             Count of issues in the project
         """
         try:
-            # Use JQL to count issues in the project
+            # Use JQL to count issues in the project via API v3
             jql = f'project = "{project_key}"'
-            result = self.jira.jql(jql=jql, fields="key", limit=1)
+            params = {
+                "jql": jql,
+                "fields": "key",
+                "maxResults": 1
+            }
+            result = self.jira.get("/rest/api/3/search", params=params)
             if not isinstance(result, dict):
                 msg = f"Unexpected return value type from `jira.jql`: {type(result)}"
                 logger.error(msg)

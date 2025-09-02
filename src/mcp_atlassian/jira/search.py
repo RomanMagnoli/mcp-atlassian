@@ -1,6 +1,7 @@
 """Module for Jira search operations."""
 
 import logging
+import re
 
 import requests
 from requests.exceptions import HTTPError
@@ -12,6 +13,66 @@ from .constants import DEFAULT_READ_JIRA_FIELDS
 from .protocols import IssueOperationsProto
 
 logger = logging.getLogger("mcp-jira")
+
+
+def normalize_jql_for_cloud(jql: str) -> str:
+    """
+    Normalize JQL to work better with Jira Cloud API v3.
+    
+    Args:
+        jql: Original JQL query
+        
+    Returns:
+        Normalized JQL query
+    """
+    # Replace accountId('id') with direct accountId assignment
+    # accountId('5d94e6fe6110c10ddb7a0435') -> '5d94e6fe6110c10ddb7a0435'
+    pattern = r"accountId\('([^']+)'\)"
+    normalized = re.sub(pattern, r"'\1'", jql)
+    
+    # Replace 'assignee in (accountId(...))' with 'assignee = accountId'
+    pattern2 = r"assignee\s+in\s+\(([^)]+)\)"
+    normalized = re.sub(pattern2, r"assignee = \1", normalized)
+    
+    logger.debug(f"JQL normalization: '{jql}' -> '{normalized}'")
+    return normalized
+
+
+def generate_jql_fallbacks(original_jql: str, account_id: str | None = None) -> list[str]:
+    """
+    Generate fallback JQL queries when the original fails.
+    
+    Args:
+        original_jql: The original JQL that failed
+        account_id: The account ID to use in fallbacks
+        
+    Returns:
+        List of fallback JQL queries to try
+    """
+    fallbacks = []
+    
+    # Try normalized version first
+    normalized = normalize_jql_for_cloud(original_jql)
+    if normalized != original_jql:
+        fallbacks.append(normalized)
+    
+    # If we have account_id, try some common variants
+    if account_id:
+        # Simple assignee with account ID
+        if "assignee" in original_jql.lower():
+            simple_assignee = f"assignee = '{account_id}'"
+            if "statusCategory" in original_jql:
+                simple_assignee += " AND statusCategory != Done"
+            if "ORDER BY" in original_jql:
+                simple_assignee += " ORDER BY updated DESC"
+            fallbacks.append(simple_assignee)
+        
+        # Use currentUser() instead
+        current_user_jql = original_jql.replace(f"assignee = '{account_id}'", "assignee = currentUser()")
+        if current_user_jql != original_jql:
+            fallbacks.append(current_user_jql)
+    
+    return fallbacks
 
 
 class SearchMixin(JiraClient, IssueOperationsProto):
@@ -76,6 +137,13 @@ class SearchMixin(JiraClient, IssueOperationsProto):
 
                 logger.info(f"Applied projects filter to query: {jql}")
 
+            # Normalize JQL for better Jira Cloud compatibility
+            if jql:
+                original_jql = jql
+                jql = normalize_jql_for_cloud(jql)
+                if jql != original_jql:
+                    logger.info(f"Normalized JQL: {original_jql} -> {jql}")
+
             # Convert fields to proper format if it's a list/tuple/set
             fields_param: str | None
             if fields is None:  # Use default if None
@@ -138,11 +206,32 @@ class SearchMixin(JiraClient, IssueOperationsProto):
                 return search_result
             else:
                 limit = min(limit, 50)
-                response = self.jira.jql(
-                    jql, fields=fields_param, start=start, limit=limit, expand=expand
-                )
+                
+                # Normalize JQL for better Jira Cloud compatibility
+                normalized_jql = normalize_jql_for_cloud(jql)
+                logger.debug(f"Original JQL: {jql}")
+                logger.debug(f"Normalized JQL: {normalized_jql}")
+                
+                # Use API v3 search endpoint directly
+                params = {
+                    "jql": normalized_jql,  # Use normalized JQL
+                    "startAt": start,
+                    "maxResults": limit,
+                    "fields": fields_param,
+                }
+                if expand:
+                    params["expand"] = expand
+                
+                logger.debug(f"JQL search params: {params}")
+                response = self.jira.get("/rest/api/3/search", params=params)
+                logger.debug(f"JQL search response type: {type(response)}")
+                logger.debug(f"JQL search response keys: {list(response.keys()) if isinstance(response, dict) else 'N/A'}")
+                if isinstance(response, dict):
+                    logger.debug(f"Response total: {response.get('total')}, startAt: {response.get('startAt')}, maxResults: {response.get('maxResults')}")
+                    logger.debug(f"Issues count in response: {len(response.get('issues', []))}")
+                
                 if not isinstance(response, dict):
-                    msg = f"Unexpected return value type from `jira.jql`: {type(response)}"
+                    msg = f"Unexpected return value type from JQL search API: {type(response)}"
                     logger.error(msg)
                     raise TypeError(msg)
 
@@ -155,16 +244,22 @@ class SearchMixin(JiraClient, IssueOperationsProto):
                 return search_result
 
         except HTTPError as http_err:
-            if http_err.response is not None and http_err.response.status_code in [
-                401,
-                403,
-            ]:
-                error_msg = (
-                    f"Authentication failed for Jira API ({http_err.response.status_code}). "
-                    "Token may be expired or invalid. Please verify credentials."
-                )
-                logger.error(error_msg)
-                raise MCPAtlassianAuthenticationError(error_msg) from http_err
+            logger.error(f"HTTP error during JQL search: {http_err}")
+            if http_err.response is not None:
+                logger.error(f"Response status: {http_err.response.status_code}")
+                logger.error(f"Response content: {http_err.response.text}")
+                
+                if http_err.response.status_code in [401, 403]:
+                    error_msg = (
+                        f"Authentication failed for Jira API ({http_err.response.status_code}). "
+                        "Token may be expired or invalid. Please verify credentials."
+                    )
+                    logger.error(error_msg)
+                    raise MCPAtlassianAuthenticationError(error_msg) from http_err
+                elif http_err.response.status_code == 400:
+                    error_msg = f"Bad request - possibly invalid JQL: {jql}"
+                    logger.error(error_msg)
+                    raise Exception(error_msg) from http_err
             else:
                 logger.error(f"HTTP error during API call: {http_err}", exc_info=False)
                 raise http_err
@@ -204,16 +299,19 @@ class SearchMixin(JiraClient, IssueOperationsProto):
             if fields_param is None:
                 fields_param = ",".join(DEFAULT_READ_JIRA_FIELDS)
 
-            response = self.jira.get_issues_for_board(
-                board_id=board_id,
-                jql=jql,
-                fields=fields_param,
-                start=start,
-                limit=limit,
-                expand=expand,
-            )
+            # Use direct API v3 call instead of library method
+            params = {
+                "jql": jql,
+                "fields": fields_param,
+                "startAt": start,
+                "maxResults": limit,
+            }
+            if expand:
+                params["expand"] = expand
+            
+            response = self.jira.get(f"/rest/agile/1.0/board/{board_id}/issue", params=params)
             if not isinstance(response, dict):
-                msg = f"Unexpected return value type from `jira.get_issues_for_board`: {type(response)}"
+                msg = f"Unexpected return value type from board issues API: {type(response)}"
                 logger.error(msg)
                 raise TypeError(msg)
 
@@ -263,13 +361,15 @@ class SearchMixin(JiraClient, IssueOperationsProto):
             if fields_param is None:
                 fields_param = ",".join(DEFAULT_READ_JIRA_FIELDS)
 
-            response = self.jira.get_sprint_issues(
-                sprint_id=sprint_id,
-                start=start,
-                limit=limit,
-            )
+            # Use direct API call instead of library method
+            params = {
+                "startAt": start,
+                "maxResults": limit,
+            }
+            
+            response = self.jira.get(f"/rest/agile/1.0/sprint/{sprint_id}/issue", params=params)
             if not isinstance(response, dict):
-                msg = f"Unexpected return value type from `jira.get_sprint_issues`: {type(response)}"
+                msg = f"Unexpected return value type from sprint issues API: {type(response)}"
                 logger.error(msg)
                 raise TypeError(msg)
 

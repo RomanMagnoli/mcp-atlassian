@@ -153,7 +153,7 @@ class JiraClient:
             logger.debug(
                 "Testing Jira authentication by retrieving current user info..."
             )
-            current_user = self.jira.myself()
+            current_user = self.jira.get("/rest/api/3/myself")
             if current_user:
                 logger.info(
                     f"Jira authentication successful. "
@@ -264,7 +264,7 @@ class JiraClient:
                 )
             else:
                 api_result = self.jira.post(
-                    path=url, json=current_data, absolute=absolute
+                    path=url, data=current_data, absolute=absolute
                 )
 
             if not isinstance(api_result, dict):
@@ -313,7 +313,7 @@ class JiraClient:
         if description:
             payload["description"] = description
         logger.info(f"Creating Jira version: {payload}")
-        result = self.jira.post("/rest/api/3/version", json=payload)
+        result = self.jira.post("/rest/api/3/version", data=payload)
         if not isinstance(result, dict):
             error_message = f"Unexpected response from Jira API: {result}"
             raise ValueError(error_message)

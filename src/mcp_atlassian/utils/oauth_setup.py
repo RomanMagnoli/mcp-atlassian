@@ -299,7 +299,7 @@ def run_oauth_flow(args: OAuthSetupArgs) -> bool:
 
             vscode_config = {
                 "mcpServers": {
-                    "mcp-atlassian": {
+            "mcp-atlassian": {
                         "command": "docker",
                         "args": [
                             "run",

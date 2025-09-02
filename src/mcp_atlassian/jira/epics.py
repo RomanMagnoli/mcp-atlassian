@@ -42,9 +42,14 @@ class EpicsMixin(
             if all(field in field_ids for field in ["epic_name", "epic_link"]):
                 return
 
-            # Find an Epic in the system
+            # Find an Epic in the system via API v3
             epics_jql = "issuetype = Epic ORDER BY created DESC"
-            results = self.jira.jql(epics_jql, fields="*all", limit=1)
+            params = {
+                "jql": epics_jql,
+                "fields": "*all",
+                "maxResults": 1
+            }
+            results = self.jira.get("/rest/api/3/search", params=params)
             if not isinstance(results, dict):
                 msg = f"Unexpected return value type from `jira.jql`: {type(results)}"
                 logger.error(msg)
@@ -306,18 +311,18 @@ class EpicsMixin(
             Exception: If there is an error linking the issue to the epic
         """
         try:
-            # Verify that both issue and epic exist
-            issue = self.jira.get_issue(issue_key)
-            epic = self.jira.get_issue(epic_key)
+            # Verify that both issue and epic exist using direct API v3 calls
+            issue = self.jira.get(f"/rest/api/3/issue/{issue_key}")
+            epic = self.jira.get(f"/rest/api/3/issue/{epic_key}")
             if not isinstance(issue, dict):
                 msg = (
-                    f"Unexpected return value type from `jira.get_issue`: {type(issue)}"
+                    f"Unexpected return value type from issue API: {type(issue)}"
                 )
                 logger.error(msg)
                 raise TypeError(msg)
             if not isinstance(epic, dict):
                 msg = (
-                    f"Unexpected return value type from `jira.get_issue`: {type(epic)}"
+                    f"Unexpected return value type from issue API: {type(epic)}"
                 )
                 logger.error(msg)
                 raise TypeError(msg)
@@ -447,11 +452,11 @@ class EpicsMixin(
             Exception: If there is an error getting epic issues
         """
         try:
-            # First, check if the issue is an Epic
-            epic = self.jira.get_issue(epic_key)
+            # First, check if the issue is an Epic using direct API v3 call
+            epic = self.jira.get(f"/rest/api/3/issue/{epic_key}")
             if not isinstance(epic, dict):
                 msg = (
-                    f"Unexpected return value type from `jira.get_issue`: {type(epic)}"
+                    f"Unexpected return value type from issue API: {type(epic)}"
                 )
                 logger.error(msg)
                 raise TypeError(msg)
@@ -742,9 +747,10 @@ class EpicsMixin(
         # As a last resort, look for any customfield that starts with customfield_
         # and has "epic" in its schema name or description
         try:
-            all_fields = self.jira.get_all_fields()
+            # Use direct API v3 call instead of library method
+            all_fields = self.jira.get("/rest/api/3/field")
             if not isinstance(all_fields, list):
-                msg = f"Unexpected return value type from `jira.get_all_fields`: {type(all_fields)}"
+                msg = f"Unexpected return value type from fields API: {type(all_fields)}"
                 logger.error(msg)
                 raise TypeError(msg)
 
@@ -778,9 +784,13 @@ class EpicsMixin(
             List of epics found
         """
         try:
-            # Search for issues with type=Epic
+            # Search for issues with type=Epic via API v3
             jql = "issuetype = Epic ORDER BY updated DESC"
-            response = self.jira.jql(jql, limit=1)
+            params = {
+                "jql": jql,
+                "maxResults": 1
+            }
+            response = self.jira.get("/rest/api/3/search", params=params)
             if not isinstance(response, dict):
                 msg = f"Unexpected return value type from `jira.jql`: {type(response)}"
                 logger.error(msg)
@@ -811,7 +821,11 @@ class EpicsMixin(
                 f"issueFunction in issuesScopedToEpic('{epic_key}')",
             ]:
                 try:
-                    response = self.jira.jql(query, limit=5)
+                    params = {
+                        "jql": query,
+                        "maxResults": 5
+                    }
+                    response = self.jira.get("/rest/api/3/search", params=params)
                     if not isinstance(response, dict):
                         msg = f"Unexpected return value type from `jira.jql`: {type(response)}"
                         logger.error(msg)

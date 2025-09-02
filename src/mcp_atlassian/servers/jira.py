@@ -695,21 +695,33 @@ async def create_issue(
     if not isinstance(extra_fields, dict):
         raise ValueError("additional_fields must be a dictionary.")
 
-    issue = jira.create_issue(
-        project_key=project_key,
-        summary=summary,
-        issue_type=issue_type,
-        description=description,
-        assignee=assignee,
-        components=components_list,
-        **extra_fields,
-    )
-    result = issue.to_simplified_dict()
-    return json.dumps(
-        {"message": "Issue created successfully", "issue": result},
-        indent=2,
-        ensure_ascii=False,
-    )
+    logger.info(f"Creating issue: project={project_key}, summary='{summary}', type={issue_type}")
+    logger.info(f"Additional params: assignee={assignee}, components={components_list}")
+    if extra_fields:
+        logger.info(f"Extra fields provided: {list(extra_fields.keys())}")
+    
+    try:
+        issue = jira.create_issue(
+            project_key=project_key,
+            summary=summary,
+            issue_type=issue_type,
+            description=description,
+            assignee=assignee,
+            components=components_list,
+            **extra_fields,
+        )
+        logger.info(f"Issue created successfully: {issue.key}")
+        result = issue.to_simplified_dict()
+        return json.dumps(
+            {"message": "Issue created successfully", "issue": result},
+            indent=2,
+            ensure_ascii=False,
+        )
+    except Exception as e:
+        logger.error(f"Failed to create issue: {str(e)}")
+        logger.error(f"Error type: {type(e).__name__}")
+        logger.error(f"Parameters: project_key={project_key}, summary='{summary}', issue_type={issue_type}")
+        raise Exception(f"Failed to create issue: {str(e)}") from e
 
 
 @jira_mcp.tool(tags={"jira", "write"})
@@ -859,14 +871,15 @@ async def update_issue(
     ctx: Context,
     issue_key: Annotated[str, Field(description="Jira issue key (e.g., 'PROJ-123')")],
     fields: Annotated[
-        dict[str, Any],
+        dict[str, Any] | None,
         Field(
             description=(
-                "Dictionary of fields to update. For 'assignee', provide a string identifier (email, name, or accountId). "
-                "Example: `{'assignee': 'user@example.com', 'summary': 'New Summary'}`"
-            )
+                "(Optional) Dictionary of fields to update. For 'assignee', provide a string identifier (email, name, or accountId). "
+                "Example: `{'assignee': 'user@example.com', 'summary': 'New Summary'}`. If not provided, use additional_fields."
+            ),
+            default=None,
         ),
-    ],
+    ] = None,
     additional_fields: Annotated[
         dict[str, Any] | None,
         Field(
@@ -890,7 +903,7 @@ async def update_issue(
     Args:
         ctx: The FastMCP context.
         issue_key: Jira issue key.
-        fields: Dictionary of fields to update.
+        fields: Optional dictionary of fields to update.
         additional_fields: Optional dictionary of additional fields.
         attachments: Optional JSON array string or comma-separated list of file paths.
 
@@ -901,15 +914,19 @@ async def update_issue(
         ValueError: If in read-only mode or Jira client unavailable, or invalid input.
     """
     jira = await get_jira_fetcher(ctx)
-    # Use fields directly as dict
-    if not isinstance(fields, dict):
+    # Use fields directly as dict, default to empty dict if None
+    update_fields = fields or {}
+    if not isinstance(update_fields, dict):
         raise ValueError("fields must be a dictionary.")
-    update_fields = fields
 
     # Use additional_fields directly as dict
     extra_fields = additional_fields or {}
     if not isinstance(extra_fields, dict):
         raise ValueError("additional_fields must be a dictionary.")
+
+    # If both fields and additional_fields are empty, raise an error
+    if not update_fields and not extra_fields:
+        raise ValueError("At least one of 'fields' or 'additional_fields' must be provided and non-empty.")
 
     # Parse attachments
     attachment_paths = []

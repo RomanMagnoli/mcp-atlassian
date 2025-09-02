@@ -90,9 +90,9 @@ class AttachmentsMixin(JiraClient, AttachmentsOperationsProto):
         target_path = Path(target_dir)
         target_path.mkdir(parents=True, exist_ok=True)
 
-        # Get the issue with attachments
+        # Get the issue with attachments via API v3
         logger.info(f"Fetching issue {issue_key} with attachments")
-        issue_data = self.jira.issue(issue_key, fields="attachment")
+        issue_data = self.jira.get(f"/rest/api/3/issue/{issue_key}", params={"fields": "attachment"})
 
         if not isinstance(issue_data, dict):
             msg = f"Unexpected return value type from `jira.issue`: {type(issue_data)}"

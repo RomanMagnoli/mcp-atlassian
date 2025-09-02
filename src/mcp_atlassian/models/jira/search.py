@@ -62,19 +62,34 @@ class JiraSearchResult(ApiModel):
         raw_start_at = data.get("startAt")
         raw_max_results = data.get("maxResults")
 
+        # Log warning if critical fields are missing
+        if raw_total is None:
+            logger.warning("API response missing 'total' field")
+        if raw_start_at is None:
+            logger.warning("API response missing 'startAt' field")  
+        if raw_max_results is None:
+            logger.warning("API response missing 'maxResults' field")
+
+        # Log the full response for debugging if fields are missing
+        if raw_total is None or raw_start_at is None or raw_max_results is None:
+            logger.debug(f"Incomplete API response: {data}")
+
         try:
             total = int(raw_total) if raw_total is not None else -1
         except (ValueError, TypeError):
+            logger.warning(f"Could not convert 'total' to int: {raw_total}")
             total = -1
 
         try:
             start_at = int(raw_start_at) if raw_start_at is not None else -1
         except (ValueError, TypeError):
+            logger.warning(f"Could not convert 'startAt' to int: {raw_start_at}")
             start_at = -1
 
         try:
             max_results = int(raw_max_results) if raw_max_results is not None else -1
         except (ValueError, TypeError):
+            logger.warning(f"Could not convert 'maxResults' to int: {raw_max_results}")
             max_results = -1
 
         return cls(

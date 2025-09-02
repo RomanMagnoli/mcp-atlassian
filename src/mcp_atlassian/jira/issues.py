@@ -1,5 +1,6 @@
 """Module for Jira issue operations."""
 
+import json
 import logging
 from collections import defaultdict
 from typing import Any
@@ -140,20 +141,24 @@ class IssuesMixin(
             if properties and isinstance(properties, list | tuple | set):
                 properties_param = ",".join(properties)
 
-            # Get the issue data with all parameters
-            issue = self.jira.get_issue(
-                issue_key,
-                expand=expand_param,
-                fields=fields_param,
-                properties=properties_param,
-                update_history=update_history,
-            )
+            # Get the issue data with all parameters using direct API v3 call
+            params = {}
+            if expand_param:
+                params["expand"] = expand_param
+            if fields_param:
+                params["fields"] = fields_param
+            if properties_param:
+                params["properties"] = properties_param
+            if update_history:
+                params["updateHistory"] = "true"
+                
+            issue = self.jira.get(f"/rest/api/3/issue/{issue_key}", params=params)
             if not issue:
                 msg = f"Issue {issue_key} not found"
                 raise ValueError(msg)
             if not isinstance(issue, dict):
                 msg = (
-                    f"Unexpected return value type from `jira.get_issue`: {type(issue)}"
+                    f"Unexpected return value type from issue API: {type(issue)}"
                 )
                 logger.error(msg)
                 raise TypeError(msg)
@@ -202,6 +207,9 @@ class IssuesMixin(
 
             # Update the issue data with the fields
             issue["fields"] = fields_data
+
+            # Convert ADF description back to plain text for the model
+            self._convert_adf_descriptions_in_issue_data(issue)
 
             # Create and return the JiraIssue model, passing requested_fields
             return JiraIssue.from_api_response(
@@ -269,9 +277,10 @@ class IssuesMixin(
         """
         if comment_limit is None or comment_limit > 0:
             try:
-                response = self.jira.issue_get_comments(issue_key)
+                # Use direct API v3 call instead of library method
+                response = self.jira.get(f"/rest/api/3/issue/{issue_key}/comment")
                 if not isinstance(response, dict):
-                    msg = f"Unexpected return value type from `jira.issue_get_comments`: {type(response)}"
+                    msg = f"Unexpected return value type from comments API: {type(response)}"
                     logger.error(msg)
                     raise TypeError(msg)
 
@@ -332,17 +341,17 @@ class IssuesMixin(
                     epic_key = fields[epic_link_field]
                     epic_info["epic_key"] = epic_key
 
-                    # Try to get epic details
+                    # Try to get epic details using direct API v3 call
                     try:
-                        epic = self.jira.get_issue(
-                            epic_key,
-                            expand=None,
-                            fields=None,
-                            properties=None,
-                            update_history=True,
-                        )
+                        params = {
+                            "expand": "",
+                            "fields": "*all",
+                            "properties": "*all",
+                            "updateHistory": "true"
+                        }
+                        epic = self.jira.get(f"/rest/api/3/issue/{epic_key}", params=params)
                         if not isinstance(epic, dict):
-                            msg = f"Unexpected return value type from `jira.get_issue`: {type(epic)}"
+                            msg = f"Unexpected return value type from issue API: {type(epic)}"
                             logger.error(msg)
                             raise TypeError(msg)
 
@@ -562,9 +571,9 @@ class IssuesMixin(
                 "issuetype": {"name": actual_issue_type},
             }
 
-            # Add description if provided (convert from Markdown to Jira format)
+            # Add description if provided (convert to Atlassian Document Format for API v3)
             if description:
-                fields["description"] = self._markdown_to_jira(description)
+                fields["description"] = self._text_to_adf(description)
 
             # Add assignee if provided
             if assignee:
@@ -608,12 +617,27 @@ class IssuesMixin(
             # Process **kwargs using the dynamic field map
             self._process_additional_fields(fields, kwargs_copy)
 
-            # Create the issue
-            response = self.jira.create_issue(fields=fields)
-            if not isinstance(response, dict):
-                msg = f"Unexpected return value type from `jira.create_issue`: {type(response)}"
-                logger.error(msg)
-                raise TypeError(msg)
+            # Create the issue using direct API v3 call
+            payload = {"fields": fields}
+            logger.info(f"Creating issue with project={project_key}, summary='{summary}', type={issue_type}")
+            logger.info(f"Full payload fields: {list(fields.keys())}")
+            
+            try:
+                response = self.jira.post("/rest/api/3/issue", data=payload)
+                logger.info(f"API response received successfully, type: {type(response)}")
+                
+                if not isinstance(response, dict):
+                    msg = f"Unexpected return value type from issue creation API: {type(response)}"
+                    logger.error(msg)
+                    raise TypeError(msg)
+                    
+            except Exception as api_error:
+                logger.error(f"API call failed: {api_error}")
+                logger.error(f"Error type: {type(api_error)}")
+                if hasattr(api_error, 'response'):
+                    logger.error(f"HTTP status: {getattr(api_error.response, 'status_code', 'unknown')}")
+                    logger.error(f"Response text: {getattr(api_error.response, 'text', 'no text')}")
+                raise
 
             # Get the created issue key
             issue_key = response.get("key")
@@ -639,12 +663,16 @@ class IssuesMixin(
                             "Continuing with the original Epic that was successfully created"
                         )
 
-            # Get the full issue data and convert to JiraIssue model
-            issue_data = self.jira.get_issue(issue_key)
+            # Get the full issue data and convert to JiraIssue model using direct API v3 call
+            issue_data = self.jira.get(f"/rest/api/3/issue/{issue_key}")
             if not isinstance(issue_data, dict):
-                msg = f"Unexpected return value type from `jira.get_issue`: {type(issue_data)}"
+                msg = f"Unexpected return value type from issue API: {type(issue_data)}"
                 logger.error(msg)
                 raise TypeError(msg)
+            
+            # Convert ADF description back to plain text for the model
+            self._convert_adf_descriptions_in_issue_data(issue_data)
+            
             return JiraIssue.from_api_response(issue_data)
 
         except Exception as e:
@@ -800,10 +828,18 @@ class IssuesMixin(
             fields: The fields dictionary to update
             kwargs: Additional fields provided via **kwargs
         """
+        logger.info(f"Processing additional fields: {list(kwargs.keys()) if kwargs else 'none'}")
+        
         # Ensure field map is loaded/cached
-        field_map = (
-            self._generate_field_map()
-        )  # Ensure map is ready (method from FieldsMixin)
+        try:
+            field_map = (
+                self._generate_field_map()
+            )  # Ensure map is ready (method from FieldsMixin)
+            logger.info(f"Field map generated successfully, found {len(field_map) if field_map else 0} fields")
+        except Exception as e:
+            logger.error(f"Error generating field map: {e}")
+            field_map = None
+            
         if not field_map:
             logger.error(
                 "Could not generate field map. Cannot process additional fields."
@@ -1014,7 +1050,7 @@ class IssuesMixin(
 
             # Convert description from Markdown to Jira format if present
             if "description" in update_fields:
-                update_fields["description"] = self._markdown_to_jira(
+                update_fields["description"] = self._text_to_adf(
                     update_fields["description"]
                 )
 
@@ -1045,19 +1081,23 @@ class IssuesMixin(
                         except ValueError as e:
                             logger.warning(f"Could not update assignee: {str(e)}")
                 elif key == "description":
-                    # Handle description with markdown conversion
-                    update_fields["description"] = self._markdown_to_jira(value)
+                    # Handle description with ADF conversion for API v3
+                    update_fields["description"] = self._text_to_adf(value)
                 else:
                     # Process regular fields using _process_additional_fields
                     # Create a temporary dict with just this field
                     field_kwargs = {key: value}
                     self._process_additional_fields(update_fields, field_kwargs)
 
-            # Update the issue fields
+            # Update the issue fields using direct API v3 call
             if update_fields:
-                self.jira.update_issue(
-                    issue_key=issue_key, update={"fields": update_fields}
-                )
+                update_payload = {"fields": update_fields}
+                logger.debug(f"Updating issue {issue_key} with payload: {update_payload}")
+                try:
+                    self.jira.put(f"/rest/api/3/issue/{issue_key}", data=update_payload)
+                except Exception as e:
+                    logger.error(f"Error updating issue {issue_key}: {e}")
+                    raise
 
             # Handle attachments if provided
             if "attachments" in kwargs and kwargs["attachments"]:
@@ -1074,12 +1114,16 @@ class IssuesMixin(
                     )
                     # Continue with the update even if attachments fail
 
-            # Get the updated issue data and convert to JiraIssue model
-            issue_data = self.jira.get_issue(issue_key)
+            # Get the updated issue data and convert to JiraIssue model using direct API v3 call
+            issue_data = self.jira.get(f"/rest/api/3/issue/{issue_key}")
             if not isinstance(issue_data, dict):
-                msg = f"Unexpected return value type from `jira.get_issue`: {type(issue_data)}"
+                msg = f"Unexpected return value type from issue API: {type(issue_data)}"
                 logger.error(msg)
                 raise TypeError(msg)
+            
+            # Convert ADF description back to plain text for the model
+            self._convert_adf_descriptions_in_issue_data(issue_data)
+            
             issue = JiraIssue.from_api_response(issue_data)
 
             # Add attachment results to the response if available
@@ -1112,17 +1156,27 @@ class IssuesMixin(
         # Extract status from fields and remove it for the standard update
         status = fields.pop("status", None)
 
-        # First update any fields if needed
+        # First update any fields if needed using direct API v3 call
         if fields:
-            self.jira.update_issue(issue_key=issue_key, fields=fields)  # type: ignore[call-arg]
+            update_payload = {"fields": fields}
+            logger.debug(f"Updating issue {issue_key} fields with payload: {update_payload}")
+            try:
+                self.jira.put(f"/rest/api/3/issue/{issue_key}", data=update_payload)
+            except Exception as e:
+                logger.error(f"Error updating issue {issue_key} fields: {e}")
+                raise
 
         # If no status change is requested, return the issue
         if not status:
-            issue_data = self.jira.get_issue(issue_key)
+            issue_data = self.jira.get(f"/rest/api/3/issue/{issue_key}")
             if not isinstance(issue_data, dict):
-                msg = f"Unexpected return value type from `jira.get_issue`: {type(issue_data)}"
+                msg = f"Unexpected return value type from issue API: {type(issue_data)}"
                 logger.error(msg)
                 raise TypeError(msg)
+            
+            # Convert ADF description back to plain text for the model
+            self._convert_adf_descriptions_in_issue_data(issue_data)
+            
             return JiraIssue.from_api_response(issue_data)
 
         # Get available transitions (uses TransitionsMixin's normalized implementation)
@@ -1216,12 +1270,19 @@ class IssuesMixin(
             ),
         )
 
-        # Get the updated issue data
-        issue_data = self.jira.get_issue(issue_key)
+        # Get the updated issue data using direct API v3 call
+        issue_data = self.jira.get(f"/rest/api/3/issue/{issue_key}")
         if not isinstance(issue_data, dict):
-            msg = f"Unexpected return value type from `jira.get_issue`: {type(issue_data)}"
+            msg = f"Unexpected return value type from issue API: {type(issue_data)}"
             logger.error(msg)
             raise TypeError(msg)
+        
+        # Convert ADF description back to plain text for the model
+        if "fields" in issue_data and "description" in issue_data["fields"]:
+            description_field = issue_data["fields"]["description"]
+            if isinstance(description_field, dict):
+                issue_data["fields"]["description"] = self._adf_to_text(description_field)
+        
         return JiraIssue.from_api_response(issue_data)
 
     def delete_issue(self, issue_key: str) -> bool:
@@ -1460,6 +1521,12 @@ class IssuesMixin(
                             logger.error(msg)
                             raise TypeError(msg)
 
+                        # Convert ADF description back to plain text for the model
+                        if "fields" in issue_data and "description" in issue_data["fields"]:
+                            description_field = issue_data["fields"]["description"]
+                            if isinstance(description_field, dict):
+                                issue_data["fields"]["description"] = self._adf_to_text(description_field)
+
                         created_issues.append(
                             JiraIssue.from_api_response(
                                 issue_data,
@@ -1538,3 +1605,134 @@ class IssuesMixin(
         ]
 
         return issues
+
+    def _text_to_adf(self, text: str) -> dict:
+        """
+        Convert plain text to Atlassian Document Format (ADF).
+        
+        This function converts text content to the ADF format required by Jira Cloud API v3.
+        For simple text, it creates a basic ADF document with paragraph nodes.
+        
+        Args:
+            text: Plain text to convert
+            
+        Returns:
+            ADF document structure as a dictionary
+        """
+        if not text:
+            return {
+                "type": "doc",
+                "version": 1,
+                "content": []
+            }
+        
+        # Split text into paragraphs
+        paragraphs = text.strip().split('\n\n')
+        content = []
+        
+        for paragraph in paragraphs:
+            if paragraph.strip():
+                # Handle line breaks within paragraphs
+                lines = paragraph.strip().split('\n')
+                paragraph_content = []
+                
+                for i, line in enumerate(lines):
+                    if line.strip():
+                        paragraph_content.append({
+                            "type": "text",
+                            "text": line.strip()
+                        })
+                        # Add hard break for line breaks within paragraph (except last line)
+                        if i < len(lines) - 1:
+                            paragraph_content.append({
+                                "type": "hardBreak"
+                            })
+                
+                if paragraph_content:
+                    content.append({
+                        "type": "paragraph",
+                        "content": paragraph_content
+                    })
+        
+        # If no content was generated, create a simple empty paragraph
+        if not content:
+            content = [{
+                "type": "paragraph",
+                "content": []
+            }]
+        
+        return {
+            "type": "doc",
+            "version": 1,
+            "content": content
+        }
+    
+    def _adf_to_text(self, adf_content) -> str:
+        """
+        Convert Atlassian Document Format (ADF) back to plain text.
+        
+        Args:
+            adf_content: ADF document structure (dict) or string
+            
+        Returns:
+            Plain text representation
+        """
+        if not adf_content:
+            return ""
+            
+        # If it's already a string, return as-is
+        if isinstance(adf_content, str):
+            return adf_content
+            
+        # If it's not a dict (ADF structure), convert to string
+        if not isinstance(adf_content, dict):
+            return str(adf_content)
+        
+        # Parse ADF structure
+        content = adf_content.get("content", [])
+        if not content:
+            return ""
+        
+        paragraphs = []
+        for node in content:
+            if node.get("type") == "paragraph":
+                paragraph_text = self._extract_text_from_paragraph(node)
+                if paragraph_text:
+                    paragraphs.append(paragraph_text)
+        
+        return "\n\n".join(paragraphs)
+    
+    def _extract_text_from_paragraph(self, paragraph_node: dict) -> str:
+        """
+        Extract text from a paragraph ADF node.
+        
+        Args:
+            paragraph_node: ADF paragraph node
+            
+        Returns:
+            Plain text from the paragraph
+        """
+        content = paragraph_node.get("content", [])
+        if not content:
+            return ""
+        
+        text_parts = []
+        for node in content:
+            if node.get("type") == "text":
+                text_parts.append(node.get("text", ""))
+            elif node.get("type") == "hardBreak":
+                text_parts.append("\n")
+        
+        return "".join(text_parts)
+    
+    def _convert_adf_descriptions_in_issue_data(self, issue_data: dict) -> None:
+        """
+        Convert ADF descriptions to plain text in issue data (in-place).
+        
+        Args:
+            issue_data: Issue data dictionary that may contain ADF descriptions
+        """
+        if "fields" in issue_data and "description" in issue_data["fields"]:
+            description_field = issue_data["fields"]["description"]
+            if isinstance(description_field, dict):
+                issue_data["fields"]["description"] = self._adf_to_text(description_field)

@@ -38,9 +38,9 @@ class UsersMixin(JiraClient):
 
         try:
             logger.debug(
-                "Calling self.jira.myself() to get current user details for account ID."
+                "Calling self.jira.get('/rest/api/3/myself') to get current user details for account ID."
             )
-            myself_data = self.jira.myself()
+            myself_data = self.jira.get("/rest/api/3/myself")
 
             if not isinstance(myself_data, dict):
                 error_msg = "Failed to get user data: response was not a dictionary."
@@ -150,15 +150,23 @@ class UsersMixin(JiraClient):
             Optional[str]: Account ID if found, None otherwise.
         """
         try:
-            params = {}
+            # Use API v3 user search directly
             if self.config.is_cloud:
-                params["query"] = username
+                params = {
+                    "query": username,
+                    "startAt": 0,
+                    "maxResults": 1
+                }
+                response = self.jira.get("/rest/api/3/user/search", params=params)
             else:
-                params["username"] = username
-
-            response = self.jira.user_find_by_user_string(**params, start=0, limit=1)
+                params = {
+                    "username": username,
+                    "startAt": 0,
+                    "maxResults": 1
+                }
+                response = self.jira.get("/rest/api/3/user/search", params=params)
             if not isinstance(response, list):
-                msg = f"Unexpected return value type from `jira.user_find_by_user_string`: {type(response)}"
+                msg = f"Unexpected return value type from API v3 user search: {type(response)}"
                 logger.error(msg)
                 return None
 
@@ -198,7 +206,7 @@ class UsersMixin(JiraClient):
             Optional[str]: Account ID if found, None otherwise.
         """
         try:
-            url = f"{self.config.url}/rest/api/2/user/permission/search"
+            url = f"{self.config.url}/rest/api/3/user/permission/search"
             params = {"query": username, "permissions": "BROWSE"}
 
             auth = None
@@ -340,8 +348,8 @@ class UsersMixin(JiraClient):
         api_kwargs = self._determine_user_api_params(identifier)
 
         try:
-            logger.debug(f"Calling self.jira.user() with parameters: {api_kwargs}")
-            user_data = self.jira.user(**api_kwargs)
+            logger.debug(f"Calling GET /rest/api/3/user with parameters: {api_kwargs}")
+            user_data = self.jira.get("/rest/api/3/user", params=api_kwargs)
             if not isinstance(user_data, dict):
                 logger.error(
                     f"User lookup for '{identifier}' returned unexpected type: {type(user_data)}. Data: {user_data}"
