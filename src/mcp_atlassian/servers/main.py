@@ -326,8 +326,8 @@ class UserTokenMiddleware(BaseHTTPMiddleware):
 
 
 main_mcp = AtlassianMCP(name="Atlassian MCP", lifespan=main_lifespan)
-main_mcp.mount("jira", jira_mcp)
-main_mcp.mount("confluence", confluence_mcp)
+main_mcp.mount(jira_mcp, prefix="jira")
+main_mcp.mount(confluence_mcp, prefix="confluence")
 
 
 @main_mcp.custom_route("/healthz", methods=["GET"], include_in_schema=False)
@@ -336,3 +336,16 @@ async def _health_check_route(request: Request) -> JSONResponse:
 
 
 logger.info("Added /healthz endpoint for Kubernetes probes")
+
+
+def build_server(enable_network: bool = True) -> AtlassianMCP:
+    """
+    Build and return the main MCP server instance.
+    
+    Args:
+        enable_network: Whether to enable network features (for compatibility with old API)
+        
+    Returns:
+        The configured AtlassianMCP server instance
+    """
+    return main_mcp

@@ -5,13 +5,43 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from md2conf.converter import (
-    ConfluenceConverterOptions,
-    ConfluenceStorageFormatConverter,
-    elements_from_string,
-    elements_to_string,
-    markdown_to_html,
-)
+# Try to import md2cf first, then fallback to md2conf, then to a basic implementation
+MD_CONVERTER_AVAILABLE = False
+try:
+    # nombre más común en PyPI
+    from md2cf.converter import (
+        ConfluenceConverterOptions,
+        ConfluenceStorageFormatConverter,
+        elements_from_string,
+        elements_to_string,
+        markdown_to_html,
+    )
+    MD_CONVERTER_AVAILABLE = True
+except ModuleNotFoundError:
+    try:
+        # fallback si alguien instala otro fork con ese nombre
+        from md2conf.converter import (
+            ConfluenceConverterOptions,
+            ConfluenceStorageFormatConverter,
+            elements_from_string,
+            elements_to_string,
+            markdown_to_html,
+        )
+        MD_CONVERTER_AVAILABLE = True
+    except ModuleNotFoundError:
+        # Fallback básico - el warning se mostrará más tarde cuando se use
+        MD_CONVERTER_AVAILABLE = False
+
+# Basic markdown to HTML converter if md2cf is not available
+try:
+    import markdown
+    MARKDOWN_AVAILABLE = True
+except ModuleNotFoundError:
+    try:
+        from markdownify import markdownify
+        MARKDOWN_AVAILABLE = True
+    except ModuleNotFoundError:
+        MARKDOWN_AVAILABLE = False
 
 from .base import BasePreprocessor
 
@@ -43,6 +73,10 @@ class ConfluencePreprocessor(BasePreprocessor):
         Returns:
             Confluence storage format (XHTML) string
         """
+        if not MD_CONVERTER_AVAILABLE:
+            logger.warning("md2cf/md2conf not available, using basic markdown conversion")
+            return self._basic_markdown_to_confluence(markdown_content)
+            
         try:
             # First convert markdown to HTML
             html_content = markdown_to_html(markdown_content)
@@ -84,13 +118,64 @@ class ConfluencePreprocessor(BasePreprocessor):
             logger.error(f"Error converting markdown to Confluence storage format: {e}")
             logger.exception(e)
 
-            # Fall back to a simpler method if the conversion fails
-            html_content = markdown_to_html(markdown_content)
+            # Fall back to basic conversion
+            return self._basic_markdown_to_confluence(markdown_content)
 
-            # Use a different approach that doesn't rely on the HTML macro
-            # This creates a proper Confluence storage format document
-            storage_format = f"""<p>{html_content}</p>"""
-
-            return str(storage_format)
+    def _basic_markdown_to_confluence(self, markdown_content: str) -> str:
+        """
+        Basic fallback for markdown to Confluence conversion when md2cf is not available
+        
+        Args:
+            markdown_content: Markdown text to convert
+            
+        Returns:
+            Basic Confluence storage format string
+        """
+        try:
+            if MARKDOWN_AVAILABLE:
+                try:
+                    import markdown
+                    # Use markdown library to convert to HTML
+                    html_content = markdown.markdown(markdown_content)
+                except ImportError:
+                    # Very basic conversion
+                    html_content = self._simple_markdown_to_html(markdown_content)
+            else:
+                html_content = self._simple_markdown_to_html(markdown_content)
+            
+            # Wrap in basic Confluence storage format
+            storage_format = f"""<ac:rich-text-body>{html_content}</ac:rich-text-body>"""
+            return storage_format
+            
+        except Exception as e:
+            logger.error(f"Error in basic markdown conversion: {e}")
+            # Last resort: just wrap the markdown as preformatted text
+            return f"""<ac:rich-text-body><pre>{markdown_content}</pre></ac:rich-text-body>"""
+    
+    def _simple_markdown_to_html(self, markdown_content: str) -> str:
+        """
+        Very basic markdown to HTML conversion for when no markdown library is available
+        """
+        import re
+        
+        html = markdown_content
+        
+        # Headers
+        html = re.sub(r'^### (.*)', r'<h3>\1</h3>', html, flags=re.MULTILINE)
+        html = re.sub(r'^## (.*)', r'<h2>\1</h2>', html, flags=re.MULTILINE)
+        html = re.sub(r'^# (.*)', r'<h1>\1</h1>', html, flags=re.MULTILINE)
+        
+        # Bold and italic
+        html = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', html)
+        html = re.sub(r'\*(.*?)\*', r'<em>\1</em>', html)
+        
+        # Links
+        html = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2">\1</a>', html)
+        
+        # Line breaks
+        html = html.replace('\n\n', '</p><p>')
+        html = f'<p>{html}</p>'
+        
+        return html
 
     # Confluence-specific methods can be added here
